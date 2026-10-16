@@ -1,4 +1,4 @@
-""SDS Sports Model — public-facing Streamlit website (sample data, no live feeds)."""
+"""SDS Sports Model — public-facing Streamlit website (sample data, no live feeds)."""
 from pathlib import Path
 import pandas as pd
 import streamlit as st
