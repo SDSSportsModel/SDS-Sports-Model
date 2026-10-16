@@ -1,0 +1,6 @@
+streamlit>=1.38,<2
+pandas>=2.2,<3
+matplotlib>=3.8,<4
+nflreadpy>=0.1.0,<1
+polars>=1.0,<2
+pyarrow>=15
