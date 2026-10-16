@@ -51,7 +51,7 @@ def score_markets(df):
     return pd.DataFrame(rows)
 
 # Public NFL data is a separate information panel, never treated as a trained projection.
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def get_public_nfl_stats():
     from nfl_stats import fetch_stats
     return fetch_stats()
