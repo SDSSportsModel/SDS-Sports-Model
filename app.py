@@ -101,7 +101,7 @@ with st.expander("🏈 REAL NFL STATS • 2026 season", expanded=True):
             leaders = player_leaderboard(stats['players'], stat=metric)
             if leaders.empty: st.info("This metric is not available in the current source data.")
             
-        try:
+try:
     if leaders.empty:
         st.info("No player data available.")
     else:
