@@ -100,7 +100,33 @@ with st.expander("🏈 REAL NFL STATS • 2026 season", expanded=True):
             metric = st.selectbox("Leaderboard", ["passing_yards", "rushing_yards", "receiving_yards", "receptions", "passing_tds", "rushing_tds", "receiving_tds"])
             leaders = player_leaderboard(stats['players'], stat=metric)
             if leaders.empty: st.info("This metric is not available in the current source data.")
-            else: st.dataframe(leaders, hide_index=True, use_container_width=True)
+            
+else:
+    display_cols = [
+        col for col in [
+            "player_name",
+            "recent_team",
+            metric,
+            "position"
+        ]
+        if col in leaders.columns
+    ]
+
+    st.dataframe(
+        leaders[display_cols],
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "player_name": "Player",
+            "recent_team": "Team",
+            metric: st.column_config.NumberColumn(
+                metric.replace("_", " ").title(),
+                format="%d"
+            ),
+            "position": "Pos"
+        }
+    )
+
     except Exception as exc:
         st.warning("NFL statistics are temporarily unavailable. The rest of the site remains usable.")
         st.caption(f"Technical detail: {type(exc).__name__}: {exc}")
