@@ -104,7 +104,7 @@ with st.expander("🏈 REAL NFL STATS • 2026 season", expanded=True):
 try:
     if leaders.empty:
         st.info("No player data available.")
-else:
+    else:
     display_cols = [
         col for col in [
             "player_name",
