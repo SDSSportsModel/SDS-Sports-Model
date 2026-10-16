@@ -54,7 +54,16 @@ def score_markets(df):
 @st.cache_data(ttl=900, show_spinner=False)
 def get_public_nfl_stats():
     from nfl_stats import fetch_stats
-    return fetch_stats()
+    import time
+    last_error = None
+    for attempt in range(3):
+        try:
+            return fetch_stats()
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    raise last_error
 
 with st.sidebar:
     st.markdown("## 🏈 SDS SPORTS MODEL")
@@ -100,36 +109,24 @@ with st.expander("🏈 REAL NFL STATS • 2026 season", expanded=True):
             metric = st.selectbox("Leaderboard", ["passing_yards", "rushing_yards", "receiving_yards", "receptions", "passing_tds", "rushing_tds", "receiving_tds"])
             leaders = player_leaderboard(stats['players'], stat=metric)
             if leaders.empty: st.info("This metric is not available in the current source data.")
-            
-try:
-    if leaders.empty:
-        st.info("No player data available.")
-    else:
-    display_cols = [
-        col for col in [
-            "player_name",
-            "recent_team",
-            metric,
-            "position"
-        ]
-        if col in leaders.columns
-    ]
-
-    st.dataframe(
-        leaders[display_cols],
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "player_name": "Player",
-            "recent_team": "Team",
-            metric: st.column_config.NumberColumn(
-                metric.replace("_", " ").title(),
-                format="%d"
-            ),
-            "position": "Pos"
-        }
-    )
-
+            else:
+                display_cols = [
+                    col for col in ["player_name", "recent_team", metric, "position"]
+                    if col in leaders.columns
+                ]
+                st.dataframe(
+                    leaders[display_cols],
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "player_name": "Player",
+                        "recent_team": "Team",
+                        metric: st.column_config.NumberColumn(
+                            metric.replace("_", " ").title()
+                        ),
+                        "position": "Pos",
+                    },
+                )
     except Exception as exc:
         st.warning("NFL statistics are temporarily unavailable. The rest of the site remains usable.")
         st.caption(f"Technical detail: {type(exc).__name__}: {exc}")
