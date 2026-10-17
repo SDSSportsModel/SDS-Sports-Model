@@ -1,56 +1,100 @@
-"""SDS Sports Model 4.0: consolidated, read-only research dashboard."""
+"""SDS Command Center 4.1: real Advanced EPA projections, no illustrative predictions."""
 import math
+import numpy as np
 import pandas as pd
 import streamlit as st
 import nflreadpy as nfl
 
 st.set_page_config(page_title="SDS Command Center", page_icon="🏈", layout="wide")
 st.title("🏈 SDS Sports Model | Command Center")
-st.caption("Experimental NFL projections, historical validation, and manual odds comparison.")
-st.warning("Research tool only. Projections are not validated betting edges; no live sportsbook feed is connected.")
+st.caption("Experimental EPA-based NFL projections, recorded model evaluation, and manual odds calculations.")
+st.warning("Research tool only. Win probabilities are uncalibrated; no live sportsbook odds.")
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_schedules():
-    return nfl.load_schedules(list(range(2021, 2027))).to_pandas()
+START_SEASON = 2022
+HOLDOUT = 2025
+LAST_TRAIN = 2025
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def prepare():
-    schedule = load_schedules()
-    if "game_type" in schedule.columns:
-        schedule = schedule[schedule["game_type"].eq("REG")]
-    required = {"season", "week", "home_team", "away_team", "home_score", "away_score"}
-    if not required.issubset(schedule.columns):
-        raise ValueError(f"Schedule missing columns: {sorted(required - set(schedule.columns))}")
-    schedule = schedule.sort_values(["season", "week"]).copy()
+@st.cache_data(ttl=21600, show_spinner=False)
+def load_data():
+    schedule = nfl.load_schedules(list(range(START_SEASON, 2027))).to_pandas()
+    chunks = []
+    for year in range(START_SEASON, LAST_TRAIN + 1):
+        pbp = nfl.load_pbp([year]).to_pandas()
+        wanted = ["game_id", "posteam", "defteam", "epa", "success", "play_type"]
+        absent = set(wanted) - set(pbp.columns)
+        if absent:
+            raise ValueError(f"Missing play-by-play columns for {year}: {sorted(absent)}")
+        pbp = pbp[wanted]
+        pbp = pbp[pbp["play_type"].isin(["run", "pass"]) &
+                  pbp["posteam"].notna() & pbp["defteam"].notna() &
+                  pbp["epa"].notna()]
+        chunks.append(pbp.groupby(["game_id", "posteam", "defteam"], as_index=False).agg(
+            off_epa=("epa", "mean"),
+            off_success=("success", "mean"),
+            plays=("epa", "size")))
+    return schedule, pd.concat(chunks, ignore_index=True)
+
+def assemble(schedule, play_stats):
+    games = schedule.copy()
+    if "game_type" in games.columns:
+        games = games[games["game_type"].eq("REG")]
+    needed = ["game_id", "season", "week", "home_team", "away_team",
+              "home_score", "away_score"]
+    absent = set(needed) - set(games.columns)
+    if absent:
+        raise ValueError(f"Missing schedule columns: {sorted(absent)}")
+    games = games.sort_values(["season", "week", "game_id"])
+    # One row per offense per game; the defense is its opponent.
+    stats = {}
+    for r in play_stats.itertuples(index=False):
+        stats[(str(r.game_id), str(r.posteam))] = (float(r.off_epa),
+            float(r.off_success) if pd.notna(r.off_success) else 0.0, int(r.plays))
     history = {}
-    records = []
-    for (season, week), group in schedule.groupby(["season", "week"], sort=True):
+    results = []
+    for (season, week), group in games.groupby(["season", "week"], sort=True):
         updates = []
         for g in group.itertuples(index=False):
-            home, away = str(g.home_team), str(g.away_team)
+            home, away, gid = str(g.home_team), str(g.away_team), str(g.game_id)
             def prior(team):
-                games = history.get(team, [])[-5:]
-                if not games:
-                    return (0.0, 0.0, 0.0)
-                return (sum(x[0] for x in games)/len(games),
-                        sum(x[1] for x in games)/len(games), len(games)/5)
+                # Recent games, excluding all games from the current week.
+                h = history.get(team, [])[-5:]
+                if not h:
+                    return [0.0, 0.0, 0.0, 0.0, 0.0]
+                arr = np.asarray(h, dtype=float)
+                return [float(v) for v in arr.mean(axis=0)[:4]] + [len(h)/5.0]
             h, a = prior(home), prior(away)
-            # Conservative baseline; coefficients deliberately not claimed to be optimized.
-            margin = 1.5 + 0.40*(h[0]-a[1]) - 0.40*(a[0]-h[1])
-            total = 44.0 + 0.35*((h[0]+a[0])-44.0)
+            features = [h[0]-a[0], h[1]-a[1], h[2]-a[2],
+                        h[3]-a[3], h[4], a[4]]
             completed = pd.notna(g.home_score) and pd.notna(g.away_score)
-            records.append({"Season": int(season), "Week": int(week), "Away": away,
-                            "Home": home, "Projected home margin": round(margin,1),
-                            "Projected total": round(total,1), "Completed": completed,
-                            "Actual home margin": float(g.home_score-g.away_score) if completed else None,
-                            "Actual total": float(g.home_score+g.away_score) if completed else None,
-                            "History available": h[2] > 0 and a[2] > 0})
+            results.append(dict(season=int(season), week=int(week), home=home,
+                away=away, game_id=gid, completed=completed, features=features,
+                margin=float(g.home_score-g.away_score) if completed else np.nan,
+                total=float(g.home_score+g.away_score) if completed else np.nan))
             if completed:
-                updates.extend([(home, (float(g.home_score),float(g.away_score))),
-                                (away, (float(g.away_score),float(g.home_score)))])
-        for team, score in updates:
-            history.setdefault(team, []).append(score)
-    return pd.DataFrame(records)
+                hs, az = stats.get((gid, home)), stats.get((gid, away))
+                # Only update efficiency features for games with BOTH teams' stats.
+                if hs and az and hs[2] >= 10 and az[2] >= 10:
+                    updates.append((home, [hs[0], az[0], hs[1], az[1]]))
+                    updates.append((away, [az[0], hs[0], az[1], hs[1]]))
+        for team, values in updates:
+            history.setdefault(team, []).append(values)
+    return pd.DataFrame(results)
+
+def ridge_fit(df, target, penalty=15.0):
+    X = np.asarray(df.features.tolist(), dtype=float)
+    X = np.column_stack([np.ones(len(X)), X])
+    y = df[target].to_numpy(dtype=float)
+    regularizer = np.diag([0.0] + [penalty] * (X.shape[1]-1))
+    beta = np.linalg.solve(X.T @ X + regularizer, X.T @ y)
+    sd = max(float(np.std(y-X@beta, ddof=min(X.shape[1],len(y)-1))), 1.0)
+    return beta, sd
+
+def forecast(df, beta):
+    X = np.asarray(df.features.tolist(), dtype=float)
+    return np.column_stack([np.ones(len(X)), X]) @ beta
+
+def normal_cdf(z):
+    return 0.5 * (1.0 + math.erf(float(z) / math.sqrt(2.0)))
 
 def american_to_probability(odds):
     if odds == 0:
@@ -62,23 +106,47 @@ def decimal_profit(odds):
 
 tab1, tab2, tab3, tab4 = st.tabs(["Predictions", "Performance", "Odds Calculator", "About"])
 with tab1:
-    st.subheader("Upcoming NFL matchups")
-    st.caption("Score-based illustrative baseline, not the Advanced EPA engine. No calibrated win probabilities.")
+    st.subheader("Advanced EPA game projections")
+    st.caption("Uses the same EPA and success-rate feature pipeline as your Advanced Game Model page. "
+               "2026 team-form inputs currently reflect available 2022–2025 play-by-play only; "
+               "they do NOT incorporate completed 2026 games.")
     try:
-        games = prepare()
-        upcoming = games[(games.Season == 2026) & (~games.Completed)].copy()
-        if upcoming.empty:
-            st.info("No unplayed 2026 regular-season matchups were returned.")
+        with st.spinner("Loading NFL play-by-play data. The first load may take several minutes..."):
+            schedules, pbp_stats = load_data()
+            data = assemble(schedules, pbp_stats)
+        completed = data[data.completed & data.season.between(START_SEASON, LAST_TRAIN)]
+        if len(completed) < 300:
+            st.error("Insufficient historical games to train the model.")
         else:
-            weeks = sorted(upcoming.Week.unique().tolist())
-            week = st.selectbox("NFL week", weeks)
-            display = upcoming[upcoming.Week == week]
-            columns = ["Week", "Away", "Home", "Projected home margin", "Projected total"]
-            st.dataframe(display[columns], hide_index=True, use_container_width=True)
-            st.download_button("Download projections CSV", display[columns].to_csv(index=False),
-                               file_name="sds_week_projections.csv", mime="text/csv")
+            margin_beta, margin_sd = ridge_fit(completed, "margin")
+            total_beta, _ = ridge_fit(completed, "total")
+            upcoming = data[(data.season.eq(2026)) & (~data.completed)].copy()
+            if upcoming.empty:
+                st.info("No unplayed 2026 regular-season matchups were returned.")
+            else:
+                upcoming["Projected home margin"] = forecast(upcoming, margin_beta)
+                upcoming["Projected total"] = forecast(upcoming, total_beta)
+                upcoming["Home win % (uncalibrated)"] = [
+                    round(100 * normal_cdf(v / margin_sd), 1)
+                    for v in upcoming["Projected home margin"]]
+                upcoming["Away win % (uncalibrated)"] = (
+                    100 - upcoming["Home win % (uncalibrated)"])
+                upcoming = upcoming.rename(columns={
+                    "week": "Week", "home": "Home", "away": "Away"})
+                week = st.selectbox("NFL week", sorted(upcoming["Week"].unique().tolist()))
+                display = upcoming[upcoming["Week"].eq(week)]
+                columns = ["Week", "Away", "Home", "Projected home margin",
+                           "Projected total", "Home win % (uncalibrated)",
+                           "Away win % (uncalibrated)"]
+                st.dataframe(display[columns].round(1), hide_index=True,
+                             use_container_width=True)
+                st.download_button("Download model projections CSV",
+                    display[columns].to_csv(index=False),
+                    file_name="sds_epa_week_projections.csv", mime="text/csv")
+                st.info("This is an EPA model projection, not a validated betting edge. "
+                        "2026 EPA data and starting-quarterback changes are not yet incorporated.")
     except Exception as error:
-        st.error("NFL schedule data could not be loaded.")
+        st.error("Advanced EPA data could not be loaded. Other SDS pages remain available.")
         st.caption(f"{type(error).__name__}: {error}")
 with tab2:
     st.subheader("Recorded 2024–2025 validation results")
@@ -90,7 +158,7 @@ with tab2:
          "Winner accuracy (%)":63.5, "Brier":0.2224},
     ])
     st.dataframe(comparison, hide_index=True, use_container_width=True)
-    st.info("These metrics came from the earlier model comparison. The Predictions tab above uses a separate illustrative formula. Do not attribute these scores to it.")
+    st.info("These metrics came from the earlier model comparison. The Predictions tab now uses the Advanced EPA pipeline, but these recorded scores come from a separate walk-forward validation and should not be presented as a live performance audit.")
 with tab3:
     st.subheader("Manual moneyline value calculator")
     st.caption("Enter YOUR independently estimated win probability and the sportsbook's American odds. No odds are fetched automatically.")
@@ -112,9 +180,9 @@ with tab3:
 with tab4:
     st.markdown("""### SDS development status
 - **Current:** Historical NFL statistics and experimental predictions.
-- **This page:** Unified navigation, recorded model comparison, and manual moneyline EV calculator.
+- **This page:** Advanced EPA projections, recorded model comparison, and manual moneyline EV calculator.
 - **Not yet implemented:** Verified starting QB adjustments, rest and schedule strength, calibrated win probabilities, automatic FanDuel lines, and audited bet tracking.
-- **Next:** A shared feature pipeline and time-ordered quarterback-aware backtest. Promote models only after independent holdout improvements.
+- **Next:** Incorporate current-season EPA and perform time-ordered quarterback-aware backtests. Promote models only after independent holdout improvements.
 
 Existing SDS pages remain available; this add-on does not change them.
 """)
