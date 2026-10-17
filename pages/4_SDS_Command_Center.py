@@ -1,4 +1,4 @@
-"""SDS Command Center 4.1: real Advanced EPA projections, no illustrative predictions."""
+"""SDS Command Center 4.2: current-season EPA with historical fallback."""
 import math
 import numpy as np
 import pandas as pd
@@ -13,26 +13,40 @@ st.warning("Research tool only. Win probabilities are uncalibrated; no live spor
 START_SEASON = 2022
 HOLDOUT = 2025
 LAST_TRAIN = 2025
+CURRENT_SEASON = 2026
 
 @st.cache_data(ttl=21600, show_spinner=False)
 def load_data():
-    schedule = nfl.load_schedules(list(range(START_SEASON, 2027))).to_pandas()
+    schedule = nfl.load_schedules(list(range(START_SEASON, CURRENT_SEASON + 1))).to_pandas()
     chunks = []
-    for year in range(START_SEASON, LAST_TRAIN + 1):
-        pbp = nfl.load_pbp([year]).to_pandas()
-        wanted = ["game_id", "posteam", "defteam", "epa", "success", "play_type"]
-        absent = set(wanted) - set(pbp.columns)
-        if absent:
-            raise ValueError(f"Missing play-by-play columns for {year}: {sorted(absent)}")
-        pbp = pbp[wanted]
-        pbp = pbp[pbp["play_type"].isin(["run", "pass"]) &
-                  pbp["posteam"].notna() & pbp["defteam"].notna() &
-                  pbp["epa"].notna()]
-        chunks.append(pbp.groupby(["game_id", "posteam", "defteam"], as_index=False).agg(
-            off_epa=("epa", "mean"),
-            off_success=("success", "mean"),
-            plays=("epa", "size")))
-    return schedule, pd.concat(chunks, ignore_index=True)
+    current_status = "2026 play-by-play available"
+    current_games = 0
+    for year in range(START_SEASON, CURRENT_SEASON + 1):
+        try:
+            pbp = nfl.load_pbp([year]).to_pandas()
+            wanted = ["game_id", "posteam", "defteam", "epa", "success", "play_type"]
+            absent = set(wanted) - set(pbp.columns)
+            if absent:
+                raise ValueError(f"Missing play-by-play fields: {sorted(absent)}")
+            pbp = pbp[wanted]
+            pbp = pbp[pbp["play_type"].isin(["run", "pass"]) &
+                      pbp["posteam"].notna() & pbp["defteam"].notna() &
+                      pbp["epa"].notna()]
+            aggregate = pbp.groupby(["game_id", "posteam", "defteam"], as_index=False).agg(
+                off_epa=("epa", "mean"), off_success=("success", "mean"),
+                plays=("epa", "size"))
+            if year == CURRENT_SEASON:
+                current_games = int(aggregate["game_id"].nunique())
+                if current_games == 0:
+                    current_status = "2026 play-by-play contains no completed games yet"
+            chunks.append(aggregate)
+        except Exception as exc:
+            if year != CURRENT_SEASON:
+                raise
+            current_status = f"2026 play-by-play unavailable ({type(exc).__name__}); using older EPA history"
+    if not chunks:
+        raise ValueError("No NFL play-by-play statistics available")
+    return schedule, pd.concat(chunks, ignore_index=True), current_status, current_games
 
 def assemble(schedule, play_stats):
     games = schedule.copy()
@@ -107,13 +121,16 @@ def decimal_profit(odds):
 tab1, tab2, tab3, tab4 = st.tabs(["Predictions", "Performance", "Odds Calculator", "About"])
 with tab1:
     st.subheader("Advanced EPA game projections")
-    st.caption("Uses the same EPA and success-rate feature pipeline as your Advanced Game Model page. "
-               "2026 team-form inputs currently reflect available 2022–2025 play-by-play only; "
-               "they do NOT incorporate completed 2026 games.")
+    st.caption("2026 completed-game EPA and success rates are included when available. "
+               "Predictions use previous weeks only; no quarterback adjustment yet.")
     try:
         with st.spinner("Loading NFL play-by-play data. The first load may take several minutes..."):
-            schedules, pbp_stats = load_data()
+            schedules, pbp_stats, current_status, current_games = load_data()
             data = assemble(schedules, pbp_stats)
+        st.caption(f"Data status: {current_status}. 2026 games with play-by-play: {current_games}.")
+        if "unavailable" in current_status:
+            st.warning("Current-season efficiency data could not be retrieved. "
+                       "Projections fall back to older team form and may be stale.")
         completed = data[data.completed & data.season.between(START_SEASON, LAST_TRAIN)]
         if len(completed) < 300:
             st.error("Insufficient historical games to train the model.")
@@ -144,7 +161,8 @@ with tab1:
                     display[columns].to_csv(index=False),
                     file_name="sds_epa_week_projections.csv", mime="text/csv")
                 st.info("This is an EPA model projection, not a validated betting edge. "
-                        "2026 EPA data and starting-quarterback changes are not yet incorporated.")
+                        "Starting-quarterback changes are not incorporated. "
+                        "Current-season data is included only when available.")
     except Exception as error:
         st.error("Advanced EPA data could not be loaded. Other SDS pages remain available.")
         st.caption(f"{type(error).__name__}: {error}")
@@ -182,7 +200,8 @@ with tab4:
 - **Current:** Historical NFL statistics and experimental predictions.
 - **This page:** Advanced EPA projections, recorded model comparison, and manual moneyline EV calculator.
 - **Not yet implemented:** Verified starting QB adjustments, rest and schedule strength, calibrated win probabilities, automatic FanDuel lines, and audited bet tracking.
-- **Next:** Incorporate current-season EPA and perform time-ordered quarterback-aware backtests. Promote models only after independent holdout improvements.
+- **This update:** Attempts to load completed 2026 EPA data; safely falls back if unavailable.
+- **Next:** Time-ordered quarterback-aware backtests, probability calibration, and weekly prediction snapshots. Promote models only after independent holdout improvements.
 
 Existing SDS pages remain available; this add-on does not change them.
 """)
