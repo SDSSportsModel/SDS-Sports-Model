@@ -81,8 +81,7 @@ if st.button('Fetch fresh predictions and odds', disabled=not is_admin):
             if future.empty: raise ValueError('No unplayed games returned')
             future['raw_home'] = [normal_cdf(m/margin_sd) for m in forecast(future,margin_beta)]
             future['cal_home'] = sigmoid(calibrator[0] + calibrator[1]*logit(future.raw_home))
-            # Force a fresh odds request for each explicit capture preview.
-            fetch_odds.clear()
+            # Fetch fresh FanDuel odds directly from the provider.
             events, remaining = fetch_odds(ODDS_KEY)
             odds = parse_odds(events)
             if odds.empty: raise ValueError('No future FanDuel moneylines available')
