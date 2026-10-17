@@ -2,14 +2,15 @@
 import io
 import json
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
 import nflreadpy as nfl
 
-st.set_page_config(page_title='SDS Performance Tracker 4.9.1', page_icon='📈', layout='wide')
-st.title('📈 SDS 4.9.1 | Performance Tracker')
+st.set_page_config(page_title='SDS Performance Tracker 4.9.2', page_icon='📈', layout='wide')
+st.title('📈 SDS 4.9.2 | Performance Tracker')
 st.warning('Research only. Hypothetical results are not verified betting returns. No wagers are placed.')
 st.caption('Records are stored in Supabase when configured. CSV export is a backup, not automatic persistence.')
 
@@ -95,9 +96,20 @@ def convert_48_export(df):
         kickoff = pd.to_datetime(row['Kickoff (UTC)'],utc=True,errors='raise')
         # Schedule's kickoff time is cross-checked when available; reject material mismatches.
         if 'gameday' in schedule.columns and 'gametime' in schedule.columns:
-            schedule_time = pd.to_datetime(f"{game.gameday} {game.gametime}",utc=True,errors='coerce')
-            if pd.notna(schedule_time) and abs((kickoff-schedule_time).total_seconds()) > 3600:
-                raise ValueError(f'Kickoff mismatch for {matchup}: CSV {kickoff}, schedule {schedule_time}')
+            # nflverse gameday/gametime are Eastern local clock values, not UTC.
+            # America/New_York handles daylight saving time on the game date.
+            local_clock = pd.to_datetime(f"{game.gameday} {game.gametime}", errors='coerce')
+            if pd.notna(local_clock):
+                schedule_time = local_clock.tz_localize(
+                    ZoneInfo('America/New_York'), ambiguous='raise', nonexistent='raise'
+                ).tz_convert('UTC')
+                if abs((kickoff - schedule_time).total_seconds()) > 600:
+                    raise ValueError(
+                        f'Kickoff mismatch for {matchup}: CSV {kickoff}, '
+                        f'NFL schedule {schedule_time} (converted from Eastern Time)'
+                    )
+                # Use the independently verified official schedule time for storage.
+                kickoff = schedule_time
         converted.append({'game_id':str(game.game_id),'kickoff_utc':kickoff.isoformat(),
                           'team':team,'opponent':opponent,'fanduel_ml':row['FanDuel ML'],
                           'raw_win_pct':row['Original SDS %'],
@@ -165,6 +177,12 @@ if upload is not None:
         st.caption('Captured-at timestamp will be the time you click Save, not the CSV export time. Only future kickoffs are accepted.')
         st.dataframe(pd.DataFrame(records), hide_index=True)
         if st.button('Save immutable pregame snapshot', disabled=not admin, type='primary'):
+            # Refresh the capture timestamp and reject any games already underway.
+            save_time = datetime.now(timezone.utc)
+            for record in records:
+                if pd.to_datetime(record['kickoff_utc'], utc=True).to_pydatetime() <= save_time:
+                    raise ValueError(f"{record['game_id']}: kickoff has passed; cannot save a pregame snapshot")
+                record['captured_at'] = save_time.isoformat()
             existing = set()
             if not history.empty:
                 existing = set(zip(history.game_id.astype(str), history.team.astype(str)))
