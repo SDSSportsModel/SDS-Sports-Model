@@ -1,4 +1,4 @@
-"""SDS 4.9: persistent, append-only pregame snapshot and grading lab."""
+"""SDS 4.9.1: persistent, append-only pregame snapshot and grading lab."""
 import io
 import json
 from datetime import datetime, timezone, timedelta
@@ -8,8 +8,8 @@ import requests
 import streamlit as st
 import nflreadpy as nfl
 
-st.set_page_config(page_title='SDS Performance Tracker 4.9', page_icon='📈', layout='wide')
-st.title('📈 SDS 4.9 | Performance Tracker')
+st.set_page_config(page_title='SDS Performance Tracker 4.9.1', page_icon='📈', layout='wide')
+st.title('📈 SDS 4.9.1 | Performance Tracker')
 st.warning('Research only. Hypothetical results are not verified betting returns. No wagers are placed.')
 st.caption('Records are stored in Supabase when configured. CSV export is a backup, not automatic persistence.')
 
@@ -42,8 +42,67 @@ def odds_profit(odds):
     if odds == 0 or -100 < odds < 100: raise ValueError('American odds must be <= -100 or >= +100.')
     return odds/100 if odds > 0 else 100/abs(odds)
 
+TEAM_NAMES = {
+    'Arizona Cardinals':'ARI','Atlanta Falcons':'ATL','Baltimore Ravens':'BAL',
+    'Buffalo Bills':'BUF','Carolina Panthers':'CAR','Chicago Bears':'CHI',
+    'Cincinnati Bengals':'CIN','Cleveland Browns':'CLE','Dallas Cowboys':'DAL',
+    'Denver Broncos':'DEN','Detroit Lions':'DET','Green Bay Packers':'GB',
+    'Houston Texans':'HOU','Indianapolis Colts':'IND','Jacksonville Jaguars':'JAX',
+    'Kansas City Chiefs':'KC','Las Vegas Raiders':'LV','Los Angeles Chargers':'LAC',
+    'Los Angeles Rams':'LA','Miami Dolphins':'MIA','Minnesota Vikings':'MIN',
+    'New England Patriots':'NE','New Orleans Saints':'NO','New York Giants':'NYG',
+    'New York Jets':'NYJ','Philadelphia Eagles':'PHI','Pittsburgh Steelers':'PIT',
+    'San Francisco 49ers':'SF','Seattle Seahawks':'SEA','Tampa Bay Buccaneers':'TB',
+    'Tennessee Titans':'TEN','Washington Commanders':'WAS',
+}
+TEAM_CODES = set(TEAM_NAMES.values())
+TEAM_ALIASES = {'LAR':'LA','WSH':'WAS','JAC':'JAX','OAK':'LV','SD':'LAC','STL':'LA'}
 def normalize_team(s):
-    return str(s).strip().upper()
+    text = str(s).strip()
+    if text in TEAM_NAMES: return TEAM_NAMES[text]
+    code = text.upper()
+    code = TEAM_ALIASES.get(code, code)
+    if code in TEAM_CODES: return code
+    raise ValueError(f'Unknown NFL team: {text!r}')
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def schedule_2026():
+    df = nfl.load_schedules([2026]).to_pandas()
+    if 'game_type' in df.columns: df = df[df.game_type.eq('REG')]
+    return df
+
+def convert_48_export(df):
+    required48 = ['Snapshot generated UTC','Week','Kickoff (UTC)','Matchup','Team',
+                  'FanDuel ML','Original SDS %','Calibrated SDS %']
+    missing = sorted(set(required48)-set(df.columns))
+    if missing: raise ValueError('4.8 export missing columns: '+', '.join(missing))
+    schedule = schedule_2026()
+    converted = []
+    for row in df.to_dict('records'):
+        matchup = str(row['Matchup'])
+        sides = matchup.split(' @ ')
+        if len(sides) != 2: raise ValueError(f'Unrecognized matchup: {matchup}')
+        away, home = (normalize_team(x) for x in sides)
+        team = normalize_team(row['Team'])
+        if team not in (home,away): raise ValueError(f'Team does not belong to matchup: {row["Team"]}')
+        opponent = away if team == home else home
+        week = int(row['Week'])
+        candidates = schedule[(schedule.week.eq(week)) &
+                              (schedule.home_team.eq(home)) & (schedule.away_team.eq(away))]
+        if len(candidates) != 1:
+            raise ValueError(f'Expected one NFL schedule match for week {week} {matchup}; got {len(candidates)}')
+        game = candidates.iloc[0]
+        kickoff = pd.to_datetime(row['Kickoff (UTC)'],utc=True,errors='raise')
+        # Schedule's kickoff time is cross-checked when available; reject material mismatches.
+        if 'gameday' in schedule.columns and 'gametime' in schedule.columns:
+            schedule_time = pd.to_datetime(f"{game.gameday} {game.gametime}",utc=True,errors='coerce')
+            if pd.notna(schedule_time) and abs((kickoff-schedule_time).total_seconds()) > 3600:
+                raise ValueError(f'Kickoff mismatch for {matchup}: CSV {kickoff}, schedule {schedule_time}')
+        converted.append({'game_id':str(game.game_id),'kickoff_utc':kickoff.isoformat(),
+                          'team':team,'opponent':opponent,'fanduel_ml':row['FanDuel ML'],
+                          'raw_win_pct':row['Original SDS %'],
+                          'calibrated_win_pct':row['Calibrated SDS %']})
+    return pd.DataFrame(converted)
 
 if not URL or not KEY:
     st.error('Persistent storage is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Streamlit Secrets, then create the table using the included SQL.')
@@ -77,12 +136,15 @@ else:
 
 st.divider()
 st.subheader('Capture pregame snapshot')
-st.caption('Upload a CSV exported from your Edge Finder or prepare one using the included template. Column names must match the template. This page does not automatically import 4.8 calculations.')
+st.caption('Upload the original SDS 4.8 CSV directly, or use the tracker template. Full NFL team names and NFL game IDs are converted and verified against the schedule.')
 upload = st.file_uploader('Snapshot CSV', type=['csv'], key='snap')
 required = ['game_id','kickoff_utc','team','opponent','fanduel_ml','raw_win_pct','calibrated_win_pct']
 if upload is not None:
     try:
         frame = pd.read_csv(upload, dtype={'game_id':str})
+        if 'Snapshot generated UTC' in frame.columns:
+            frame = convert_48_export(frame)
+            st.success('Recognized SDS 4.8 export and matched NFL schedule IDs.')
         missing = sorted(set(required)-set(frame.columns))
         if missing: raise ValueError('Missing columns: '+', '.join(missing))
         now = datetime.now(timezone.utc)
@@ -100,6 +162,7 @@ if upload is not None:
                 'raw_win_pct':raw,'calibrated_win_pct':cal,
                 'captured_at':now.isoformat(),'status':'pending'})
         if not records: raise ValueError('CSV is empty')
+        st.caption('Captured-at timestamp will be the time you click Save, not the CSV export time. Only future kickoffs are accepted.')
         st.dataframe(pd.DataFrame(records), hide_index=True)
         if st.button('Save immutable pregame snapshot', disabled=not admin, type='primary'):
             existing = set()
